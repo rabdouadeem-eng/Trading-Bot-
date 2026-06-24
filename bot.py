@@ -7,7 +7,7 @@ import os
 import time
 import logging
 import requests
-import pandas as pd
+import ta
 import pandas_ta as ta
 from datetime import datetime
 
