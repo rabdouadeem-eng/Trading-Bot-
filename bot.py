@@ -1,10 +1,6 @@
 """
-🤖 بوت إشارات التداول - نسخة مُصلَحة
+🤖 بوت إشارات التداول - نسخة مُصلَحة نهائياً
 MEXC API (بدل Binance) → RSI + EMA + MACD → Telegram
-إصلاحات:
-  ✅ MEXC بدل Binance (لا قيود جغرافية)
-  ✅ تصحيح خطأ format `:,` على string
-  ✅ keep-alive port لـ Render Web Service
 """
 
 import os
@@ -24,11 +20,11 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SYMBOL           = "BTCUSDT"
-INTERVAL         = "15m"
+INTERVAL         = "Min15"
 CHECK_EVERY      = 60 * 15
 
 
-# ─── Keep-alive لـ Render (يمنع Port Scan Timeout) ────────
+# ─── Keep-alive لـ Render ──────────────────────────────────
 def start_keep_alive():
     port = int(os.environ.get("PORT", 10000))
 
@@ -38,14 +34,14 @@ def start_keep_alive():
             self.end_headers()
             self.wfile.write(b"OK")
         def log_message(self, *args):
-            pass  # إخفاء logs الـ HTTP
+            pass
 
     server = http.server.HTTPServer(("", port), Silent)
     logger.info(f"🌐 Keep-alive server على port {port}")
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
 
-# ─── حساب EMA يدوياً ──────────────────────────────────────
+# ─── حساب EMA ─────────────────────────────────────────────
 def calc_ema(prices, period):
     if not prices:
         return 0
@@ -56,7 +52,7 @@ def calc_ema(prices, period):
     return ema
 
 
-# ─── حساب RSI يدوياً ──────────────────────────────────────
+# ─── حساب RSI ─────────────────────────────────────────────
 def calc_rsi(prices, period=14):
     gains, losses = [], []
     for i in range(1, len(prices)):
@@ -71,7 +67,7 @@ def calc_rsi(prices, period=14):
     return 100 - (100 / (1 + rs))
 
 
-# ─── حساب MACD يدوياً ─────────────────────────────────────
+# ─── حساب MACD ────────────────────────────────────────────
 def calc_macd(prices):
     if len(prices) < 26:
         return 0
@@ -80,14 +76,15 @@ def calc_macd(prices):
     return ema12 - ema26
 
 
-# ─── جلب بيانات MEXC (بدل Binance — لا قيود جغرافية) ─────
+# ─── جلب بيانات MEXC ──────────────────────────────────────
 def get_candles():
-    url = "https://api.mexc.com/api/v3/klines"  # ✅ نفس format Binance
+    url = "https://api.mexc.com/api/v3/klines"
     params = {"symbol": SYMBOL, "interval": INTERVAL, "limit": 100}
     try:
         res = requests.get(url, params=params, timeout=10)
         res.raise_for_status()
         data = res.json()
+        logger.info(f"✅ MEXC: {len(data)} شمعة جُلبت")
         closes = [float(c[4]) for c in data]
         return closes
     except Exception as e:
@@ -95,9 +92,8 @@ def get_candles():
         return []
 
 
-# ─── تنسيق السعر بأمان (يتجنب خطأ `:,` على string) ───────
+# ─── تنسيق السعر ──────────────────────────────────────────
 def fmt_price(value):
-    """✅ إصلاح: format السعر فقط إذا كان رقماً"""
     if isinstance(value, (int, float)):
         return f"{value:,.2f}"
     return str(value)
@@ -191,10 +187,10 @@ def send_telegram(message):
         logger.error(f"❌ خطأ Telegram: {e}")
 
 
-# ─── تنسيق الرسالة (مُصلَح) ───────────────────────────────
+# ─── تنسيق الرسالة ────────────────────────────────────────
 def format_message(result):
     now = datetime.now().strftime("%H:%M | %d/%m/%Y")
-    price_str = f"${fmt_price(result.get('price'))}"  # ✅ لا crash
+    price_str = f"${fmt_price(result.get('price'))}"
 
     if result["signal"] == "انتظر ⏳":
         return (
@@ -243,5 +239,5 @@ def run():
 
 
 if __name__ == "__main__":
-    start_keep_alive()  # ✅ يبدأ port للـ Render
+    start_keep_alive()
     run()
