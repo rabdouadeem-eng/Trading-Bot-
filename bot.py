@@ -1,11 +1,17 @@
 """
-🤖 بوت إشارات التداول - بدون pandas
-Binance API → RSI + EMA + MACD → Telegram
+🤖 بوت إشارات التداول - نسخة مُصلَحة
+MEXC API (بدل Binance) → RSI + EMA + MACD → Telegram
+إصلاحات:
+  ✅ MEXC بدل Binance (لا قيود جغرافية)
+  ✅ تصحيح خطأ format `:,` على string
+  ✅ keep-alive port لـ Render Web Service
 """
 
 import os
 import time
 import logging
+import threading
+import http.server
 import requests
 from datetime import datetime
 
@@ -22,8 +28,27 @@ INTERVAL         = "15m"
 CHECK_EVERY      = 60 * 15
 
 
+# ─── Keep-alive لـ Render (يمنع Port Scan Timeout) ────────
+def start_keep_alive():
+    port = int(os.environ.get("PORT", 10000))
+
+    class Silent(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        def log_message(self, *args):
+            pass  # إخفاء logs الـ HTTP
+
+    server = http.server.HTTPServer(("", port), Silent)
+    logger.info(f"🌐 Keep-alive server على port {port}")
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+
 # ─── حساب EMA يدوياً ──────────────────────────────────────
 def calc_ema(prices, period):
+    if not prices:
+        return 0
     k = 2 / (period + 1)
     ema = prices[0]
     for price in prices[1:]:
@@ -48,15 +73,16 @@ def calc_rsi(prices, period=14):
 
 # ─── حساب MACD يدوياً ─────────────────────────────────────
 def calc_macd(prices):
+    if len(prices) < 26:
+        return 0
     ema12 = calc_ema(prices[-26:], 12)
     ema26 = calc_ema(prices[-26:], 26)
-    macd_line = ema12 - ema26
-    return macd_line
+    return ema12 - ema26
 
 
-# ─── جلب بيانات Binance ───────────────────────────────────
+# ─── جلب بيانات MEXC (بدل Binance — لا قيود جغرافية) ─────
 def get_candles():
-    url = "https://api.binance.com/api/v3/klines"
+    url = "https://api.mexc.com/api/v3/klines"  # ✅ نفس format Binance
     params = {"symbol": SYMBOL, "interval": INTERVAL, "limit": 100}
     try:
         res = requests.get(url, params=params, timeout=10)
@@ -69,18 +95,27 @@ def get_candles():
         return []
 
 
+# ─── تنسيق السعر بأمان (يتجنب خطأ `:,` على string) ───────
+def fmt_price(value):
+    """✅ إصلاح: format السعر فقط إذا كان رقماً"""
+    if isinstance(value, (int, float)):
+        return f"{value:,.2f}"
+    return str(value)
+
+
 # ─── تحليل المؤشرات ───────────────────────────────────────
 def analyze(closes):
     if len(closes) < 30:
         return {"signal": "انتظر ⏳", "reasons": ["بيانات غير كافية"]}
 
-    rsi      = calc_rsi(closes)
-    ema9     = calc_ema(closes, 9)
-    ema21    = calc_ema(closes, 21)
-    ema9_p   = calc_ema(closes[:-1], 9)
-    ema21_p  = calc_ema(closes[:-1], 21)
-    macd     = calc_macd(closes)
-    macd_sig = calc_ema([calc_macd(closes[:i]) for i in range(20, len(closes))], 9)
+    rsi     = calc_rsi(closes)
+    ema9    = calc_ema(closes, 9)
+    ema21   = calc_ema(closes, 21)
+    ema9_p  = calc_ema(closes[:-1], 9)
+    ema21_p = calc_ema(closes[:-1], 21)
+    macd    = calc_macd(closes)
+    macd_values = [calc_macd(closes[:i]) for i in range(20, len(closes))]
+    macd_sig    = calc_ema(macd_values, 9)
 
     price = round(closes[-1], 2)
     rsi   = round(rsi, 2)
@@ -156,23 +191,29 @@ def send_telegram(message):
         logger.error(f"❌ خطأ Telegram: {e}")
 
 
-# ─── تنسيق الرسالة ────────────────────────────────────────
+# ─── تنسيق الرسالة (مُصلَح) ───────────────────────────────
 def format_message(result):
     now = datetime.now().strftime("%H:%M | %d/%m/%Y")
+    price_str = f"${fmt_price(result.get('price'))}"  # ✅ لا crash
+
     if result["signal"] == "انتظر ⏳":
         return (
             f"⏳ <b>BTC/USDT — انتظر</b>\n"
-            f"💰 ${result.get('price', '?'):,}\n"
+            f"💰 {price_str}\n"
             f"📊 {' | '.join(result['reasons'])}\n"
             f"🕐 {now}"
         )
+
     stars = "⭐" * result.get("strength", 1)
+    sl_str = f"${fmt_price(result.get('sl'))}"
+    tp_str = f"${fmt_price(result.get('tp'))}"
+
     return (
         f"{'🟢' if 'شراء' in result['signal'] else '🔴'} "
         f"<b>إشارة {result['signal']} — BTC/USDT</b> {stars}\n\n"
-        f"💰 سعر الدخول: <b>${result['price']:,}</b>\n"
-        f"🛑 Stop Loss:   <b>${result['sl']:,}</b>\n"
-        f"🎯 Take Profit: <b>${result['tp']:,}</b>\n\n"
+        f"💰 سعر الدخول: <b>{price_str}</b>\n"
+        f"🛑 Stop Loss:   <b>{sl_str}</b>\n"
+        f"🎯 Take Profit: <b>{tp_str}</b>\n\n"
         f"📊 " + " | ".join(result['reasons']) +
         f"\n\n⚠️ نفّذ يدوياً على Pionex\n"
         f"🕐 {now}"
@@ -202,4 +243,5 @@ def run():
 
 
 if __name__ == "__main__":
+    start_keep_alive()  # ✅ يبدأ port للـ Render
     run()
