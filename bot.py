@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SYMBOL           = "BTCUSDT"
- INTERVAL = "15m" 
+INTERVAL        = "15m"
 CHECK_EVERY      = 60 * 15
 
 
