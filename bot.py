@@ -1,6 +1,6 @@
 """
 🤖 بوت إشارات التداول - نسخة مُصلَحة نهائياً
-MEXC API (بدل Binance) → RSI + EMA + MACD → Telegram
+MEXC API → RSI + EMA + MACD → Telegram
 """
 
 import os
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SYMBOL           = "BTCUSDT"
-INTERVAL        = "15m"
+INTERVAL         = "15m"
 CHECK_EVERY      = 60 * 15
 
 
@@ -84,8 +84,11 @@ def get_candles():
         res = requests.get(url, params=params, timeout=10)
         res.raise_for_status()
         data = res.json()
-        logger.info(f"✅ MEXC: {len(data)} شمعة جُلبت")
+        if not data or not isinstance(data, list):
+            logger.warning("⚠️ MEXC رجع بيانات فارغة")
+            return []
         closes = [float(c[4]) for c in data]
+        logger.info(f"✅ MEXC: {len(closes)} شمعة جُلبت")
         return closes
     except Exception as e:
         logger.error(f"❌ خطأ في جلب البيانات: {e}")
@@ -102,7 +105,8 @@ def fmt_price(value):
 # ─── تحليل المؤشرات ───────────────────────────────────────
 def analyze(closes):
     if len(closes) < 30:
-        return {"signal": "انتظر ⏳", "reasons": ["بيانات غير كافية"]}
+        return {"signal": "انتظر ⏳", "price": closes[-1] if closes else None,
+                "reasons": ["بيانات غير كافية"]}
 
     rsi     = calc_rsi(closes)
     ema9    = calc_ema(closes, 9)
@@ -211,7 +215,7 @@ def format_message(result):
         f"🛑 Stop Loss:   <b>{sl_str}</b>\n"
         f"🎯 Take Profit: <b>{tp_str}</b>\n\n"
         f"📊 " + " | ".join(result['reasons']) +
-        f"\n\n⚠️ نفّذ يدوياً على Pionex\n"
+        f"\n\n⚠️ نفّذ يدوياً على Bybit\n"
         f"🕐 {now}"
     )
 
@@ -219,15 +223,25 @@ def format_message(result):
 # ─── الحلقة الرئيسية ──────────────────────────────────────
 def run():
     logger.info("🚀 بوت الإشارات يعمل...")
-    send_telegram("🤖 <b>بوت إشارات BTC شغّال!</b>\nيراقب كل 15 دقيقة.")
     last_signal = None
+    consecutive_failures = 0
 
     while True:
         try:
             closes = get_candles()
+
+            # ✅ FIX 1: تجاهل كامل لما البيانات فارغة أو ناقصة
+            if not closes or len(closes) < 30:
+                consecutive_failures += 1
+                logger.warning(f"⚠️ بيانات ناقصة ({consecutive_failures} مرة متتالية) — ننتظر")
+                time.sleep(CHECK_EVERY)
+                continue
+
+            consecutive_failures = 0
             result = analyze(closes)
             logger.info(f"📊 {result['signal']} | ${result.get('price', '?')}")
 
+            # ✅ FIX 2: بعت فقط لما الإشارة تتغير
             if result["signal"] != last_signal:
                 send_telegram(format_message(result))
                 last_signal = result["signal"]
