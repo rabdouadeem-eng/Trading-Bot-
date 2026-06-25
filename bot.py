@@ -1,6 +1,6 @@
 """
-🤖 بوت إشارات التداول - نسخة مُصلَحة نهائياً
-MEXC API → RSI + EMA + MACD → Telegram
+🤖 بوت إشارات التداول - النسخة العالمية
+MEXC API → RSI دقيقة بدقيقة → تنبيه مسبق + شراء + بيع قبل الذروة
 """
 
 import os
@@ -20,8 +20,14 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SYMBOL           = "BTCUSDT"
-INTERVAL         = "15m"
-CHECK_EVERY      = 60 * 15
+INTERVAL         = "1m"
+CHECK_EVERY      = 60
+
+# ─── حدود RSI ─────────────────────────────────────────────
+RSI_BUY_ALERT  = 32   # ⚠️ جهز للشراء
+RSI_BUY_NOW    = 28   # 🟢 اشري الآن (RSI نازل)
+RSI_SELL_ALERT = 68   # ⚠️ جهز للبيع
+RSI_SELL_NOW   = 72   # 🔴 بيع الآن (RSI صاعد، قبل الذروة)
 
 
 # ─── Keep-alive لـ Render ──────────────────────────────────
@@ -54,6 +60,8 @@ def calc_ema(prices, period):
 
 # ─── حساب RSI ─────────────────────────────────────────────
 def calc_rsi(prices, period=14):
+    if len(prices) < period + 1:
+        return 50
     gains, losses = [], []
     for i in range(1, len(prices)):
         diff = prices[i] - prices[i - 1]
@@ -70,10 +78,14 @@ def calc_rsi(prices, period=14):
 # ─── حساب MACD ────────────────────────────────────────────
 def calc_macd(prices):
     if len(prices) < 26:
-        return 0
+        return 0, 0
     ema12 = calc_ema(prices[-26:], 12)
     ema26 = calc_ema(prices[-26:], 26)
-    return ema12 - ema26
+    macd_line = ema12 - ema26
+    macd_values = [calc_ema(prices[:i], 12) - calc_ema(prices[:i], 26)
+                   for i in range(20, len(prices))]
+    signal_line = calc_ema(macd_values, 9) if macd_values else 0
+    return macd_line, signal_line
 
 
 # ─── جلب بيانات MEXC ──────────────────────────────────────
@@ -88,7 +100,7 @@ def get_candles():
             logger.warning("⚠️ MEXC رجع بيانات فارغة")
             return []
         closes = [float(c[4]) for c in data]
-        logger.info(f"✅ MEXC: {len(closes)} شمعة جُلبت")
+        logger.info(f"✅ MEXC: {len(closes)} شمعة | ${closes[-1]:,.2f}")
         return closes
     except Exception as e:
         logger.error(f"❌ خطأ في جلب البيانات: {e}")
@@ -102,76 +114,124 @@ def fmt_price(value):
     return str(value)
 
 
-# ─── تحليل المؤشرات ───────────────────────────────────────
+# ─── تحليل RSI مع اتجاه ───────────────────────────────────
 def analyze(closes):
     if len(closes) < 30:
-        return {"signal": "انتظر ⏳", "price": closes[-1] if closes else None,
-                "reasons": ["بيانات غير كافية"]}
+        return None
 
-    rsi     = calc_rsi(closes)
-    ema9    = calc_ema(closes, 9)
-    ema21   = calc_ema(closes, 21)
-    ema9_p  = calc_ema(closes[:-1], 9)
-    ema21_p = calc_ema(closes[:-1], 21)
-    macd    = calc_macd(closes)
-    macd_values = [calc_macd(closes[:i]) for i in range(20, len(closes))]
-    macd_sig    = calc_ema(macd_values, 9)
-
-    price = round(closes[-1], 2)
-    rsi   = round(rsi, 2)
-
-    buy_signals  = 0
-    sell_signals = 0
-    reasons      = []
-
-    if rsi < 35:
-        buy_signals += 1
-        reasons.append(f"RSI={rsi} تشبع بيع")
-    elif rsi > 65:
-        sell_signals += 1
-        reasons.append(f"RSI={rsi} تشبع شراء")
-
-    if ema9_p < ema21_p and ema9 > ema21:
-        buy_signals += 1
-        reasons.append("EMA9 تقطع EMA21 لفوق")
-    elif ema9_p > ema21_p and ema9 < ema21:
-        sell_signals += 1
-        reasons.append("EMA9 تقطع EMA21 لتحت")
-
-    if macd > macd_sig:
-        buy_signals += 1
-        reasons.append("MACD إيجابي")
-    elif macd < macd_sig:
-        sell_signals += 1
-        reasons.append("MACD سلبي")
+    rsi_curr = round(calc_rsi(closes), 2)
+    rsi_prev = round(calc_rsi(closes[:-1]), 2)
+    price    = round(closes[-1], 2)
+    macd, macd_s = calc_macd(closes)
+    macd_ok  = macd > macd_s
 
     sl_pct = 0.015
     tp_pct = 0.030
 
-    if buy_signals >= 2:
+    # ✅ الاتجاه
+    rsi_rising  = rsi_curr > rsi_prev   # RSI صاعد
+    rsi_falling = rsi_curr < rsi_prev   # RSI نازل
+
+    # 🔴 بيع الآن — RSI وصل 72 وهو صاعد (قبل الذروة)
+    if rsi_curr >= RSI_SELL_NOW and rsi_rising:
         return {
-            "signal":   "شراء 🟢",
-            "price":    price,
-            "sl":       round(price * (1 - sl_pct), 2),
-            "tp":       round(price * (1 + tp_pct), 2),
-            "reasons":  reasons,
-            "strength": buy_signals
+            "type":   "sell",
+            "signal": "🔴 بيع الآن",
+            "price":  price,
+            "rsi":    rsi_curr,
+            "rsi_prev": rsi_prev,
+            "tp":     round(price * (1 - tp_pct), 2),
+            "sl":     round(price * (1 + sl_pct), 2),
+            "macd":   "إيجابي ✅" if macd_ok else "سلبي ⚠️"
         }
-    elif sell_signals >= 2:
+
+    # ⚠️ تنبيه مسبق للبيع — RSI بين 68 و72 وصاعد
+    elif RSI_SELL_ALERT <= rsi_curr < RSI_SELL_NOW and rsi_rising:
         return {
-            "signal":   "بيع 🔴",
-            "price":    price,
-            "sl":       round(price * (1 + sl_pct), 2),
-            "tp":       round(price * (1 - tp_pct), 2),
-            "reasons":  reasons,
-            "strength": sell_signals
+            "type":   "sell_alert",
+            "signal": "⚠️ جهز للبيع",
+            "price":  price,
+            "rsi":    rsi_curr,
+            "rsi_prev": rsi_prev,
+            "macd":   "إيجابي ✅" if macd_ok else "سلبي ⚠️"
         }
-    else:
+
+    # 🟢 شراء الآن — RSI وصل 28 وهو نازل
+    elif rsi_curr <= RSI_BUY_NOW and rsi_falling:
         return {
-            "signal":  "انتظر ⏳",
-            "price":   price,
-            "reasons": reasons or ["السوق غير واضح"]
+            "type":   "buy",
+            "signal": "🟢 اشري الآن",
+            "price":  price,
+            "rsi":    rsi_curr,
+            "rsi_prev": rsi_prev,
+            "sl":     round(price * (1 - sl_pct), 2),
+            "tp":     round(price * (1 + tp_pct), 2),
+            "macd":   "إيجابي ✅" if macd_ok else "سلبي ⚠️"
         }
+
+    # ⚠️ تنبيه مسبق للشراء — RSI بين 28 و32 ونازل
+    elif RSI_BUY_NOW < rsi_curr <= RSI_BUY_ALERT and rsi_falling:
+        return {
+            "type":   "buy_alert",
+            "signal": "⚠️ جهز للشراء",
+            "price":  price,
+            "rsi":    rsi_curr,
+            "rsi_prev": rsi_prev,
+            "macd":   "إيجابي ✅" if macd_ok else "سلبي ⚠️"
+        }
+
+    return None  # صمت — لا شيء مهم
+
+
+# ─── تنسيق الرسائل ────────────────────────────────────────
+def format_message(result):
+    now       = datetime.now().strftime("%H:%M | %d/%m/%Y")
+    price_str = f"${fmt_price(result['price'])}"
+    rsi_str   = f"RSI {result['rsi_prev']} ← {result['rsi']}"
+
+    if result["type"] == "sell":
+        return (
+            f"🔴 <b>بيع الآن — BTC/USDT</b>\n\n"
+            f"💰 سعر البيع: <b>{price_str}</b>\n"
+            f"🎯 هدف الربح: <b>${fmt_price(result['tp'])}</b>\n"
+            f"🛑 Stop Loss:  <b>${fmt_price(result['sl'])}</b>\n\n"
+            f"📊 {rsi_str} 📈 صاعد نحو الذروة\n"
+            f"MACD {result['macd']}\n\n"
+            f"⚡ خذ ربحك الآن قبل الانعكاس!\n"
+            f"🕐 {now}"
+        )
+
+    elif result["type"] == "sell_alert":
+        return (
+            f"⚠️ <b>جهز للبيع — BTC/USDT</b>\n\n"
+            f"💰 السعر: <b>{price_str}</b>\n"
+            f"📊 {rsi_str} 📈 يتصاعد\n"
+            f"MACD {result['macd']}\n\n"
+            f"👀 جهز أمر البيع — إشارة البيع قريباً!\n"
+            f"🕐 {now}"
+        )
+
+    elif result["type"] == "buy":
+        return (
+            f"🟢 <b>اشري الآن — BTC/USDT</b>\n\n"
+            f"💰 سعر الدخول: <b>{price_str}</b>\n"
+            f"🎯 هدف الربح: <b>${fmt_price(result['tp'])}</b>\n"
+            f"🛑 Stop Loss:  <b>${fmt_price(result['sl'])}</b>\n\n"
+            f"📊 {rsi_str} 📉 نازل — تشبع بيع\n"
+            f"MACD {result['macd']}\n\n"
+            f"⚡ نفّذ فوراً على Bybit!\n"
+            f"🕐 {now}"
+        )
+
+    elif result["type"] == "buy_alert":
+        return (
+            f"⚠️ <b>جهز للشراء — BTC/USDT</b>\n\n"
+            f"💰 السعر: <b>{price_str}</b>\n"
+            f"📊 {rsi_str} 📉 ينزل\n"
+            f"MACD {result['macd']}\n\n"
+            f"👀 جهز رأس المال — إشارة الشراء قريباً!\n"
+            f"🕐 {now}"
+        )
 
 
 # ─── إرسال Telegram ───────────────────────────────────────
@@ -191,60 +251,33 @@ def send_telegram(message):
         logger.error(f"❌ خطأ Telegram: {e}")
 
 
-# ─── تنسيق الرسالة ────────────────────────────────────────
-def format_message(result):
-    now = datetime.now().strftime("%H:%M | %d/%m/%Y")
-    price_str = f"${fmt_price(result.get('price'))}"
-
-    if result["signal"] == "انتظر ⏳":
-        return (
-            f"⏳ <b>BTC/USDT — انتظر</b>\n"
-            f"💰 {price_str}\n"
-            f"📊 {' | '.join(result['reasons'])}\n"
-            f"🕐 {now}"
-        )
-
-    stars = "⭐" * result.get("strength", 1)
-    sl_str = f"${fmt_price(result.get('sl'))}"
-    tp_str = f"${fmt_price(result.get('tp'))}"
-
-    return (
-        f"{'🟢' if 'شراء' in result['signal'] else '🔴'} "
-        f"<b>إشارة {result['signal']} — BTC/USDT</b> {stars}\n\n"
-        f"💰 سعر الدخول: <b>{price_str}</b>\n"
-        f"🛑 Stop Loss:   <b>{sl_str}</b>\n"
-        f"🎯 Take Profit: <b>{tp_str}</b>\n\n"
-        f"📊 " + " | ".join(result['reasons']) +
-        f"\n\n⚠️ نفّذ يدوياً على Bybit\n"
-        f"🕐 {now}"
-    )
-
-
 # ─── الحلقة الرئيسية ──────────────────────────────────────
 def run():
-    logger.info("🚀 بوت الإشارات يعمل...")
-    last_signal = None
-    consecutive_failures = 0
+    logger.info("🚀 البوت العالمي يعمل — كل دقيقة")
+    last_type         = None
+    consecutive_fails = 0
 
     while True:
         try:
             closes = get_candles()
 
-            # ✅ FIX 1: تجاهل كامل لما البيانات فارغة أو ناقصة
             if not closes or len(closes) < 30:
-                consecutive_failures += 1
-                logger.warning(f"⚠️ بيانات ناقصة ({consecutive_failures} مرة متتالية) — ننتظر")
+                consecutive_fails += 1
+                logger.warning(f"⚠️ بيانات ناقصة ({consecutive_fails}x)")
                 time.sleep(CHECK_EVERY)
                 continue
 
-            consecutive_failures = 0
+            consecutive_fails = 0
             result = analyze(closes)
-            logger.info(f"📊 {result['signal']} | ${result.get('price', '?')}")
 
-            # ✅ FIX 2: بعت فقط لما الإشارة تتغير
-            if result["signal"] != last_signal:
-                send_telegram(format_message(result))
-                last_signal = result["signal"]
+            if result is None:
+                rsi = round(calc_rsi(closes), 2)
+                logger.info(f"😴 RSI={rsi} — منطقة عادية، صمت")
+            else:
+                logger.info(f"📊 {result['signal']} | RSI={result['rsi']} | ${result['price']}")
+                if result["type"] != last_type:
+                    send_telegram(format_message(result))
+                last_type = result["type"]
 
         except Exception as e:
             logger.error(f"❌ خطأ: {e}")
